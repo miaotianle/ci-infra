@@ -935,7 +935,9 @@ def test_workflow_uses_caller_history_and_exposes_generated_fields():
     assert workflow["jobs"]["prepare-matrix"]["outputs"]["should_release"] == (
         "${{ steps.matrix.outputs.should_release }}"
     )
-    for job_id in ("build-sdist", "matrix-job", "publish-sdist", "update-metadata", "post-release-data"):
+    downstream = [job_id for job_id in workflow["jobs"] if job_id != "prepare-matrix"]
+    assert {"build-sdist", "matrix-job"} <= set(downstream)
+    for job_id in downstream:
         job = workflow["jobs"][job_id]
         assert "needs.prepare-matrix.outputs.should_release == 'true'" in job["if"]
         if job_id == "build-sdist":
@@ -975,15 +977,34 @@ def migrated_workflow():
                      Loader=yaml.BaseLoader)
 
 
-def test_migrated_scripts_resolve_in_real_repository(migrated_workflow):
+# Template scripts each job runs from the ci-template checkout; together they cover every migrated script.
+TEMPLATE_SCRIPTS = {
+    "prepare-matrix": {"prepare_matrix.py"},
+    "build-sdist": {"setup.py"},
+    "update-metadata": {"get_metadata.py"},
+    "post-release-data": {"post_data.py"},
+}
+
+
+def test_disabled_features_are_absent_from_workflow(migrated_workflow, disabled_workflow_features):
+    jobs = migrated_workflow["jobs"]
+    assert not disabled_workflow_features["jobs"] & jobs.keys()
+    for job_id, name in disabled_workflow_features["steps"]:
+        assert job_id in jobs
+        assert all(step.get("name") != name for step in jobs[job_id]["steps"]), f"{job_id}/{name} is enabled again"
+
+
+def test_migrated_scripts_resolve_in_real_repository(migrated_workflow, disabled_workflow_features):
     repository = SCRIPT_PATH.parents[3]
-    paths = set()
-    template_jobs = 0
-    for job in migrated_workflow["jobs"].values():
+    assert set().union(*TEMPLATE_SCRIPTS.values()) == {path.name for path in SCRIPT_PATH.parent.glob("*.py")}
+    expected = {job_id: scripts for job_id, scripts in TEMPLATE_SCRIPTS.items()
+                if job_id not in disabled_workflow_features["jobs"]}
+    template_jobs = set()
+    for job_id, job in migrated_workflow["jobs"].items():
         references = set(re.findall(r"ci-template/([A-Za-z0-9_./-]+\.py)\b", json.dumps(job)))
         if not references:
             continue
-        template_jobs += 1
+        template_jobs.add(job_id)
         checkouts = [step for step in job["steps"]
                      if step.get("uses") == "actions/checkout@v4"
                      and step.get("with", {}).get("path") == "ci-template"]
@@ -996,9 +1017,8 @@ def test_migrated_scripts_resolve_in_real_repository(migrated_workflow):
             path = repository / relative
             assert path.is_file(), f"missing tool file after migration: {relative}"
             assert path.parent == SCRIPT_PATH.parent
-        paths.update(references)
-    assert template_jobs == 4
-    assert paths == {str(path.relative_to(repository)) for path in SCRIPT_PATH.parent.glob("*.py")}
+        assert {Path(relative).name for relative in references} == expected.get(job_id)
+    assert template_jobs == expected.keys()
     inputs = migrated_workflow["on"]["workflow_call"]["inputs"]
     assert inputs["template_repository"]["default"] == "t-head/ci-infra"
     assert inputs["template_ref"]["required"] == "true"

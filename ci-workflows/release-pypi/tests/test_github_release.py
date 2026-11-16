@@ -35,13 +35,19 @@ def wheel_artifact(workflow):
                 if step.get("name") == "Save GitHub Release wheel artifacts")
 
 
-def test_tag_artifact_follows_upload_and_precedes_success_marker(workflow, wheel_artifact):
+def test_tag_artifact_follows_upload_and_precedes_success_marker(workflow, wheel_artifact, skip_if_disabled):
+    for name in ("Upload wheel to Artifactory", "Generate release data JSON", "Save release data JSON",
+                 "Record matrix job success", "Save matrix job success marker"):
+        skip_if_disabled("matrix-job", name)
     steps = workflow["jobs"]["matrix-job"]["steps"]
     index = steps.index(wheel_artifact)
     assert steps[index - 1]["name"] == "Upload wheel to Artifactory"
     assert [step["name"] for step in steps[index + 1:]] == [
         "Generate release data JSON", "Save release data JSON", "Record matrix job success", "Save matrix job success marker",
     ]
+
+
+def test_tag_artifact_is_gated_and_saves_dist_wheels(wheel_artifact):
     assert wheel_artifact["if"] == (
         "${{ needs.prepare-matrix.outputs.should_release == 'true' && "
         "(inputs.tag_version != '' || github.ref_type == 'tag') }}"
@@ -77,7 +83,10 @@ def test_wheel_artifact_accepts_validated_override(wheel_artifact, tag_version, 
     ("Save GitHub Release wheel artifacts", "release-wheels"),
     ("Save release data JSON", "release-data"),
 ])
-def test_artifact_names_are_isolated_by_package_run_attempt_and_matrix(workflow, field, other, step_name, label):
+def test_artifact_names_are_isolated_by_package_run_attempt_and_matrix(
+    workflow, skip_if_disabled, field, other, step_name, label
+):
+    skip_if_disabled("matrix-job", step_name)
     artifact = next(step for step in workflow["jobs"]["matrix-job"]["steps"] if step["name"] == step_name)
 
     def render_names(overrides):
@@ -95,7 +104,9 @@ def test_artifact_names_are_isolated_by_package_run_attempt_and_matrix(workflow,
     assert names.isdisjoint(render_names({field: other}))
 
 
-def test_release_data_is_saved_after_publication_without_tag_only_gate(workflow):
+def test_release_data_is_saved_after_publication_without_tag_only_gate(workflow, skip_if_disabled):
+    for name in ("Upload wheel to Artifactory", "Generate release data JSON", "Save release data JSON"):
+        skip_if_disabled("matrix-job", name)
     steps = workflow["jobs"]["matrix-job"]["steps"]
     generate = next(step for step in steps if step["name"] == "Generate release data JSON")
     save = steps[steps.index(generate) + 1]
@@ -125,7 +136,8 @@ def test_workflow_and_jobs_only_require_read_access(workflow):
         assert job.get("permissions", workflow["permissions"]) == {"contents": "read"}
 
 
-def test_post_job_downloads_current_release_data_and_limits_secret_scope(workflow):
+def test_post_job_downloads_current_release_data_and_limits_secret_scope(workflow, skip_if_disabled):
+    skip_if_disabled("post-release-data")
     job = workflow["jobs"]["post-release-data"]
     assert set(job["needs"]) == {"prepare-matrix", "update-metadata"}
     secrets = workflow["on"]["workflow_call"]["secrets"]
@@ -163,7 +175,9 @@ def test_post_job_downloads_current_release_data_and_limits_secret_scope(workflo
                 assert all(f"secrets.{name}" not in str(step) for name in api_secrets)
 
 
-def test_post_download_pattern_matches_all_current_matrix_records(workflow):
+def test_post_download_pattern_matches_all_current_matrix_records(workflow, skip_if_disabled):
+    skip_if_disabled("matrix-job", "Save release data JSON")
+    skip_if_disabled("post-release-data")
     save = next(step for step in workflow["jobs"]["matrix-job"]["steps"] if step["name"] == "Save release data JSON")
     download = workflow["jobs"]["post-release-data"]["steps"][0]
 
@@ -188,7 +202,8 @@ def test_post_download_pattern_matches_all_current_matrix_records(workflow):
     (False, "true", "failure", False), (False, "true", "skipped", False),
     (False, "true", "cancelled", False), (True, "true", "success", False),
 ])
-def test_post_gate_requires_metadata_success(workflow, cancelled, release, result, expected):
+def test_post_gate_requires_metadata_success(workflow, skip_if_disabled, cancelled, release, result, expected):
+    skip_if_disabled("post-release-data")
     condition = workflow["jobs"]["post-release-data"]["if"]
     assert condition == (
         "${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && "

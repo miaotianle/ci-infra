@@ -58,7 +58,8 @@ def workflow():
 
 
 @pytest.fixture
-def publish_job(workflow):
+def publish_job(workflow, skip_if_disabled):
+    skip_if_disabled("publish-sdist")
     return workflow["jobs"]["publish-sdist"]
 
 
@@ -122,7 +123,14 @@ def test_publish_waits_for_all_matrix_jobs_and_handles_aggregate_failure(publish
     assert "continue-on-error" not in publish_job
 
 
-def test_markers_only_follow_successful_wheel_upload(workflow, workspace, run_step):
+def test_matrix_job_keeps_running_after_partial_failures(workflow):
+    assert "outputs" not in workflow["jobs"]["matrix-job"]
+    assert workflow["jobs"]["matrix-job"]["strategy"]["fail-fast"] == "false"
+
+
+def test_markers_only_follow_successful_wheel_upload(workflow, workspace, run_step, skip_if_disabled):
+    for name in ("Upload wheel to Artifactory", "Record matrix job success", "Save matrix job success marker"):
+        skip_if_disabled("matrix-job", name)
     steps = workflow["jobs"]["matrix-job"]["steps"]
     upload = next(step for step in steps if step.get("name") == "Upload wheel to Artifactory")
     create, save = steps[-2:]
@@ -137,8 +145,6 @@ def test_markers_only_follow_successful_wheel_upload(workflow, workspace, run_st
     assert (workspace / "matrix-success.txt").read_text() == "success\n"
     assert save["with"]["path"] == "${{ runner.temp }}/matrix-success.txt"
     assert save["with"]["if-no-files-found"] == "error"
-    assert "outputs" not in workflow["jobs"]["matrix-job"]
-    assert workflow["jobs"]["matrix-job"]["strategy"]["fail-fast"] == "false"
 
 
 def test_marker_names_are_unique_and_run_attempt_scoped(workflow, publish_job):
@@ -433,7 +439,8 @@ def test_real_archives_keep_their_distinct_metadata_and_setup(workspace, run_upl
                 assert archive.extractfile(name).read() == contents
 
 
-def test_update_metadata_uses_template_and_step_scoped_credentials(workflow):
+def test_update_metadata_uses_template_and_step_scoped_credentials(workflow, skip_if_disabled):
+    skip_if_disabled("update-metadata")
     job = workflow["jobs"]["update-metadata"]
     assert job["name"] == "Update metadata"
     assert set(job["needs"]) == {"prepare-matrix", "publish-sdist"}
@@ -477,8 +484,9 @@ def test_update_metadata_uses_template_and_step_scoped_credentials(workflow):
     (True, "true", "success", "true", False),
 ])
 def test_update_metadata_gate_requires_actual_sdist_publication(
-    workflow, cancelled, should_release, result, published, expected
+    workflow, skip_if_disabled, cancelled, should_release, result, published, expected
 ):
+    skip_if_disabled("update-metadata")
     condition = workflow["jobs"]["update-metadata"]["if"]
     assert condition == (
         "${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && "

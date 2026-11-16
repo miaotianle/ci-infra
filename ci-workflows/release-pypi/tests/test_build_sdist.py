@@ -434,7 +434,7 @@ def test_tag_sdist_uses_prepared_release_version(workspace, run_build, tag_repos
     ("2.4.0+v0.5.0", "2.4.0+v0.5.0.sail2.2.0"),
 ])
 def test_tag_version_drives_sdist_build_and_publication(
-    workflow, workspace, generate_matrix, run_build, tag_version, release_version, prefix
+    workflow, workspace, generate_matrix, run_build, skip_if_disabled, tag_version, release_version, prefix
 ):
     # The source directory has no Git repository; the overridden version does not depend on an existing tag, and the two Torch matrix entries build only one sdist.
     matrix = generate_matrix(tag_version=prefix + tag_version, GITHUB_REF_TYPE="branch", GITHUB_REF_NAME="main")
@@ -456,6 +456,8 @@ def test_tag_version_drives_sdist_build_and_publication(
         template = archive.extractfile(f"{root}/setup.py").read().decode()
         assert f'build_version = "{release_version}"' in template
 
+    # The build assertions above always run; only the publication half depends on the publish-sdist job.
+    skip_if_disabled("publish-sdist")
     download = workspace / "sdist-dist"
     download.mkdir()
     shutil.copy2(archive_path, download / archive_path.name)
@@ -502,7 +504,7 @@ def test_later_sdist_failure_stops_remaining_versions(workspace, run_build):
     ["1.2.3+sail2.1.0", "1.2.3+sail2.2.0", "1.2.3+sail2.1.0"],
     ["v1.0.0+V0.3.0.sail2.2.0", "v1.0.0+V0.3.0.sail2.2.0"],
 ])
-def test_builds_and_publishes_each_distinct_release_version(workflow, workspace, run_build, versions):
+def test_builds_and_publishes_each_distinct_release_version(workflow, workspace, run_build, skip_if_disabled, versions):
     result = run_build(versions=versions)
     assert result.returncode == 0, result.stdout + result.stderr
     unique_versions = list(dict.fromkeys(versions))
@@ -526,6 +528,7 @@ def test_builds_and_publishes_each_distinct_release_version(workflow, workspace,
         shutil.copy2(path, download / path.name)
         original_bytes[path.name] = path.read_bytes()
 
+    skip_if_disabled("publish-sdist")
     step = workflow["jobs"]["publish-sdist"]["steps"][-1]
     calls = workspace / "upload-calls"
     shim = '''python3() { "$TEST_PYTHON" "$@"; }

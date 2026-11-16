@@ -120,7 +120,8 @@ def workflow():
 
 
 @pytest.fixture
-def upload_step(workflow):
+def upload_step(workflow, skip_if_disabled):
+    skip_if_disabled("matrix-job", "Upload wheel to Artifactory")
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
                 if step.get("name") == "Upload wheel to Artifactory")
 
@@ -315,13 +316,15 @@ def run_collect(collect_step, workspace):
 
 
 @pytest.fixture
-def repack_step(workflow):
+def repack_step(workflow, skip_if_disabled):
+    skip_if_disabled("matrix-job", "Repack wheel")
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
                 if step.get("name") == "Repack wheel")
 
 
 @pytest.fixture
-def rename_step(workflow):
+def rename_step(workflow, skip_if_disabled):
+    skip_if_disabled("matrix-job", "Rename wheel")
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
                 if step.get("name") == "Rename wheel")
 
@@ -385,7 +388,8 @@ def run_upload(upload_step, workspace):
 
 
 @pytest.fixture
-def run_release_data(workflow, workspace):
+def run_release_data(workflow, workspace, skip_if_disabled):
+    skip_if_disabled("matrix-job", "Generate release data JSON")
     step = next(step for step in workflow["jobs"]["matrix-job"]["steps"]
                 if step["name"] == "Generate release data JSON")
 
@@ -933,7 +937,10 @@ def test_nonrelease_matrix_build_stops_after_original_wheel_artifact(
 
     jobs = workflow["jobs"]
     assert allows(jobs["matrix-job"]["if"])
-    for job_id in ("build-sdist", "publish-sdist", "update-metadata", "post-release-data"):
+    # Every enabled release job downstream of the matrix must stay blocked for non-release builds.
+    downstream = [job_id for job_id in jobs if job_id not in ("prepare-matrix", "matrix-job")]
+    assert "build-sdist" in downstream
+    for job_id in downstream:
         assert not allows(jobs[job_id]["if"])
     (workspace / "build output").mkdir()
     command = f"printf 'test wheel data' > {shlex.quote('build output/' + WHEEL_NAME)}"
@@ -1478,7 +1485,8 @@ def test_release_json_without_code_tag_fails_instead_of_using_branch_name(run_re
     assert not (workspace / "release-data").exists()
 
 
-def test_release_json_shell_syntax(workflow):
+def test_release_json_shell_syntax(workflow, skip_if_disabled):
+    skip_if_disabled("matrix-job", "Generate release data JSON")
     step = next(step for step in workflow["jobs"]["matrix-job"]["steps"]
                 if step["name"] == "Generate release data JSON")
     result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
