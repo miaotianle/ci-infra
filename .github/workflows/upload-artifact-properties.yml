@@ -152,4 +152,4 @@ jobs:
           GITHUB_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RELEASE_USERNAME: ${{ secrets.release_username }}
           RELEASE_TOKEN: ${{ secrets.release_token }}
-        run: python ci-template/ci-templates/upload-artifact-properties/scripts/upload_artifact.py
+        run: python ci-template/ci-workflows/upload-artifact-properties/scripts/upload_artifact.py

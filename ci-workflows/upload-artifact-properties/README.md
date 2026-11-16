@@ -160,7 +160,7 @@ Run from the repository root in a prepared Python 3.12 environment:
 
 ```bash
 python -m pip install --no-input pytest PyYAML
-PYTHONDONTWRITEBYTECODE=1 python -m pytest ci-templates/upload-artifact-properties/tests -q -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 python -m pytest ci-workflows/upload-artifact-properties/tests -q -p no:cacheprovider
 ```
 
 Local tests check the official Action versions and their `skip-decompress` configuration, the consistency between the download and upload directories, raw ZIP byte preservation, and the Properties contract. Upload and property requests are both mocked, so no real credentials are needed, no official Actions are executed, and no actual Artifactory is contacted; downloading, permissions, and network verification in a real GitHub Actions environment still require an online run.

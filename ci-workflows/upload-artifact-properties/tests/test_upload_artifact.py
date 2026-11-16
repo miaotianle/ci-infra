@@ -839,8 +839,10 @@ def test_workflow_contract_and_step_order():
     assert upload["env"]["RELEASE_USERNAME"] == "${{ secrets.release_username }}"
     assert upload["env"]["RELEASE_TOKEN"] == "${{ secrets.release_token }}"
     assert upload["run"] == (
-        "python ci-template/ci-templates/upload-artifact-properties/scripts/upload_artifact.py"
+        "python ci-template/ci-workflows/upload-artifact-properties/scripts/upload_artifact.py"
     )
+    # The checkout path is ci-template/, so the remainder must resolve to the script in this repository.
+    assert (ROOT.parents[1] / upload["run"].split()[-1].removeprefix("ci-template/")).resolve() == SCRIPT
     assert job["outputs"]["batch_url"] == "${{ steps.upload.outputs.batch_url }}"
     assert job["outputs"]["upload_urls"] == "${{ steps.upload.outputs.upload_urls }}"
     for key in ("batch_url", "upload_urls"):
