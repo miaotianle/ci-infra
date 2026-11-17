@@ -710,6 +710,63 @@ class LifecycleTests(unittest.TestCase):
                 self.assertFalse(any(call["args"][0] == "create"
                                      for call in self.calls("kubectl")[before:]))
 
+    def test_rack_nodes_pin_workers_to_racks_in_listed_order(self):
+        for racks, expected in ((None, [None, None, None]),
+                                (" rack-01=2, rack-02=1 ", ["rack-01", "rack-01", "rack-02"])):
+            with self.subTest(racks=racks):
+                self.configure([pod(i, scheduled=EPOCH) for i in range(3)])
+                rc, outputs, text = self.run_script(
+                    "submit.sh", INPUT_NNODES="3", INPUT_NODE_SELECTOR="board-type=ZW-M890P",
+                    **({"INPUT_RACK_NODES": racks} if racks else {}))
+                self.assertEqual(rc, 0, text)
+                self.assertEqual(outputs["job_status"], "scheduled")
+                self.assertEqual(self.manifest("podgroup.yaml")["spec"]["minMember"], 3)
+                for index, rack in enumerate(expected):
+                    spec = self.worker_manifest(index)["spec"]
+                    selector = {"board-type": "ZW-M890P", **({"icn-rack": rack} if rack else {})}
+                    self.assertEqual(spec["nodeSelector"], selector)
+                    anti = spec["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                    self.assertEqual(anti[0]["topologyKey"], "kubernetes.io/hostname")
+
+    def test_submit_rejects_invalid_rack_nodes_before_creation(self):
+        board = "board-type=ZW-M890P"
+        cases = (
+            ("0", board, "rack-01=1", "gang mode"),
+            ("2", "board-type=OAM-810E", "rack-01=2", "board-type=ZW-M890P"),
+            ("2", "", "rack-01=2", "board-type=ZW-M890P"),
+            ("2", board + ",icn-rack=rack-01", "rack-01=2", "icn-rack"),
+            ("2", board, "rack-01=1", "add up to 1"),
+            ("2", board, "rack-01=1,rack-01=1", "more than once"),
+            ("2", board, "rack-01=0,rack-02=2", "RACK=COUNT"),
+            ("2", board, "rack-01", "RACK=COUNT"),
+            ("2", board, "=2", "RACK=COUNT"),
+            ("2", board, "rack 01=2", "RACK=COUNT"),
+            ("2", board, "rack-01=2;touch unsafe", "RACK=COUNT"),
+            ("2", board, "rack-01=2,\nrack-02=1", "line breaks"),
+            ("2", board, "rack-01=2,\r\nrack-02=1", "line breaks"),
+            ("2", board, "rack-01=2\r", "line breaks"),
+            ("2", board, "\nrack-01=2", "line breaks"),
+            ("2", board, "rack-01=2\n", "line breaks"),
+            ("2", board, "rack-01=1, ,rack-02=1", "empty entries"),
+            ("2", board, "rack-01=1,,rack-02=1", "empty entries"),
+            ("2", board, ",rack-01=2", "empty entries"),
+            ("2", board, " ,rack-01=2", "empty entries"),
+            ("2", board, "rack-01=2,", "empty entries"),
+            ("2", board, "rack-01=2, \t", "empty entries"),
+            ("2", board, " \t ", "empty entries"),
+            ("2", board, ",", "empty entries"),
+        )
+        for nodes, selector, racks, message in cases:
+            with self.subTest(selector=selector, racks=racks):
+                before = len(self.calls("kubectl"))
+                self.configure([pod(i, scheduled=EPOCH) for i in range(2)])
+                rc, _, text = self.run_script(
+                    "submit.sh", INPUT_NNODES=nodes, INPUT_NODE_SELECTOR=selector, INPUT_RACK_NODES=racks)
+                self.assertNotEqual(rc, 0, text)
+                self.assertIn(message, text)
+                self.assertFalse(any(call["args"][0] in ("create", "delete")
+                                     for call in self.calls("kubectl")[before:]))
+
     def test_each_node_default_and_explicit_modes_preserve_resource_counts(self):
         for mode in (None, "each-node"):
             with self.subTest(mode=mode):
