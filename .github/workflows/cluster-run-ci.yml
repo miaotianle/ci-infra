@@ -31,6 +31,16 @@ env:
     ppu-smi
     sleep 30
 
+  RACK_SMOKE_COMMAND: |
+    set -euo pipefail
+    test -f /workspace/source/cluster-run/action.yml
+    test -f /workspace/source/README.md
+    test -d /nas_aisw
+    test -d /mnt/wl_nas
+    printf 'rank=%s node_rank=%s world_size=%s nodes=%s cards=%s\n' "$RANK" "$NODE_RANK" "$WORLD_SIZE" "$NNODES" "$NPROC_PER_NODE"
+    ppu-smi
+    sleep 300
+
   MASTER_SMOKE_COMMAND: |
     set -euo pipefail
     test "$RANK" = 0
@@ -188,11 +198,25 @@ jobs:
             nodes: 2
             devices: 8
             board_type: ZW-M890P
-          - label: two 890P workers pinned to one ICN rack
+          - label: two 890P workers in one automatic ICN rack
             nodes: 2
             devices: 1
             board_type: ZW-M890P
-            rack_nodes: rack-01=2
+            rack_policy: same
+            rack_command: rack
+          - label: three 890P workers across automatic ICN racks
+            nodes: 3
+            devices: 1
+            board_type: ZW-M890P
+            rack_policy: spread
+            rack_command: rack
+          - label: two 890P workers across exactly two automatic ICN racks
+            nodes: 2
+            devices: 1
+            board_type: ZW-M890P
+            rack_policy: spread
+            rack_count: 2
+            rack_command: rack
           - label: one 810E card
             nodes: 0
             devices: 1
@@ -223,10 +247,34 @@ jobs:
           nnodes: ${{ matrix.nodes }}
           nproc_per_node: ${{ matrix.devices }}
           node_selector: board-type=${{ matrix.board_type }}
-          rack_nodes: ${{ matrix.rack_nodes }}
+          rack_policy: ${{ matrix.rack_policy }}
+          rack_count: ${{ matrix.rack_count }}
           dmesg_policy: always
           timeout_minutes: 10
-          command: ${{ env.SMOKE_COMMAND }}
+          command: ${{ matrix.rack_command == 'rack' && env.RACK_SMOKE_COMMAND || env.SMOKE_COMMAND }}
+
+      - name: Assert worker rack placement
+        if: matrix.rack_command == 'rack'
+        shell: bash
+        env:
+          TASK_RACKS: ${{ steps.smoke.outputs.task_racks }}
+          RACK_POLICY: ${{ matrix.rack_policy }}
+          RACK_COUNT: ${{ matrix.rack_count }}
+          EXPECTED_WORKERS: ${{ matrix.nodes }}
+        run: |
+          set -euo pipefail
+          printf 'task_racks=%s\n' "$TASK_RACKS"
+          jq -e --argjson expected "$EXPECTED_WORKERS" 'length == $expected and all(.[]; . != "")' <<< "$TASK_RACKS"
+          racks="$(jq -r 'unique | length' <<< "$TASK_RACKS")"
+          if [ "$RACK_POLICY" = same ]; then
+            [ "$racks" -eq 1 ]
+          else
+            [ "$racks" -ge 2 ]
+            jq -e 'group_by(.) | map(length) | (max - min) <= 1' <<< "$TASK_RACKS"
+            if [ -n "$RACK_COUNT" ]; then
+              [ "$racks" -eq "$RACK_COUNT" ]
+            fi
+          fi
 
       - name: Assert reported results
         shell: bash
@@ -679,6 +727,52 @@ jobs:
           printf 'outcome=%s status=%s\n' "$ALLOCATION_OUTCOME" "$ALLOCATION_STATUS"
           [ "$ALLOCATION_OUTCOME" = failure ]
           [ "$ALLOCATION_STATUS" = timeout ]
+
+  rack-count-block-check:
+    name: Reject unavailable rack-count candidates
+    needs: checks
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Request deliberately unavailable rack candidates
+        id: blocked_racks
+        continue-on-error: true
+        uses: $/cluster-run
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 2
+          nproc_per_node: 1
+          node_selector: board-type=ZW-M890P,nic-type=cx8,ppu-ci-unavailable-rack=${{ github.run_id }}-${{ github.run_attempt }}
+          rack_policy: spread
+          rack_count: 2
+          timeout_minutes: 2
+          command: echo 'Unavailable rack candidates unexpectedly started' && exit 1
+
+      - name: Require timeout without worker resources
+        shell: bash
+        env:
+          ALLOCATION_NAME: ${{ steps.blocked_racks.outputs.job_name }}
+          ALLOCATION_OUTCOME: ${{ steps.blocked_racks.outcome }}
+          ALLOCATION_STATUS: ${{ steps.blocked_racks.outputs.job_status }}
+          ALLOCATION_PODS: ${{ steps.blocked_racks.outputs.task_pods }}
+        run: |
+          printf 'outcome=%s status=%s pods=%s\n' "$ALLOCATION_OUTCOME" "$ALLOCATION_STATUS" "$ALLOCATION_PODS"
+          [ "$ALLOCATION_OUTCOME" = failure ]
+          [ "$ALLOCATION_STATUS" = timeout ]
+          [ -n "$ALLOCATION_NAME" ]
+          [ -z "$ALLOCATION_PODS" ]
+          pods="$(kubectl get pods -n "$TEST_NAMESPACE" -l "ppu-job=$ALLOCATION_NAME" -o name)"
+          test -z "$pods"
+          groups="$(kubectl get podgroups.scheduling.x-k8s.io "$ALLOCATION_NAME" -n "$TEST_NAMESPACE" --ignore-not-found=true -o name)"
+          test -z "$groups"
 
   build-fixture:
     name: Create transfer fixture

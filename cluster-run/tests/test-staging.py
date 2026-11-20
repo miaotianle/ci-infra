@@ -69,6 +69,9 @@ def fake_command(tool, args):
         if args[:2] == ["get", "pods"]:
             print(fixture.get("pods", ""), end="")
             return fixture.get("query_status", 0)
+        if args[:2] == ["get", "nodes"]:
+            print(json.dumps({"items": fixture.get("nodes", [])}))
+            return fixture.get("query_status", 0)
     if tool == "curl":
         if "-o" in args:
             Path(args[args.index("-o") + 1]).write_text(wrapper("kubectl"))
@@ -371,14 +374,21 @@ class StagingTests(unittest.TestCase):
         self.fake("kubectl")
         self.fake("timeout")
         scripts = [step["run"] for job in self.workflow["jobs"].values() for step in job["steps"]
-                   if "kubectl get pods" in step.get("run", "")]
+                   if "kubectl get pods" in step.get("run", "") and "-o json" not in step.get("run", "")]
         self.assertTrue(scripts)
         env = dict(self.env)
         for script in scripts:
             step = next(step for job in self.workflow["jobs"].values() for step in job["steps"]
                         if step.get("run") == script)
             for key in step.get("env", {}):
-                env[key] = "success" if "OUTCOME" in key else "succeeded"
+                if "OUTCOME" in key:
+                    env[key] = "failure" if '[ "$ALLOCATION_OUTCOME" = failure ]' in script else "success"
+                elif key == "ALLOCATION_STATUS":
+                    env[key] = "timeout" if '[ "$ALLOCATION_STATUS" = timeout ]' in script else "succeeded"
+                elif key == "ALLOCATION_PODS":
+                    env[key] = ""
+                else:
+                    env[key] = "succeeded"
             env.update(NAMESPACE="fixture", TEST_NAMESPACE="fixture", ALLOCATION_NAME="fixture-job")
             script = script.replace("/wl_nas/devops/runtime/master", str(self.nas / "runtime"))
             for status, pods, expected in ((0, "", 0), (0, "pod/remaining\n", 1), (37, "", 37)):
@@ -407,7 +417,7 @@ class StagingTests(unittest.TestCase):
         existing = {"nnodes", "nproc_per_node", "command", "image", "namespace", "timeout_minutes",
                     "host_volumes", "extra_env", "master_port", "cleanup_policy", "source_dir",
                     "node_selector", "container_options", "artifact_paths", "job_suffix", "dmesg_policy",
-                    "rack_nodes"}
+                    "rack_policy", "rack_count"}
         self.assertEqual(set(self.action["inputs"]) - existing, {"launch_mode", "setup_command", "ssh_port"})
         for key, default in (("launch_mode", "each-node"), ("setup_command", ""), ("ssh_port", "2222")):
             self.assertEqual(str(self.action["inputs"][key]["default"]), default)
@@ -421,12 +431,17 @@ class StagingTests(unittest.TestCase):
         self.assertEqual(steps["monitor"]["env"]["JOB_DEADLINE"], "${{ steps.submit.outputs.deadline }}")
         self.assertEqual(steps["cleanup"]["if"], "always()")
 
-    def test_rack_nodes_input_is_optional_and_reaches_submission(self):
-        rack_nodes = self.action["inputs"]["rack_nodes"]
-        self.assertEqual(rack_nodes["default"], "")
-        self.assertIs(rack_nodes.get("required", False), False)
+    def test_rack_policy_input_is_optional_and_reaches_submission(self):
+        policy = self.action["inputs"]["rack_policy"]
+        self.assertEqual(policy["default"], "")
+        self.assertIs(policy.get("required", False), False)
+        self.assertNotIn("rack_nodes", self.action["inputs"])
         steps = {step["id"]: step for step in self.action["runs"]["steps"] if "id" in step}
-        self.assertEqual(steps["submit"]["env"]["INPUT_RACK_NODES"], "${{ inputs.rack_nodes }}")
+        self.assertEqual(steps["submit"]["env"]["INPUT_RACK_POLICY"], "${{ inputs.rack_policy }}")
+        self.assertEqual(self.action["inputs"]["rack_count"]["default"], "")
+        self.assertIs(self.action["inputs"]["rack_count"].get("required", False), False)
+        self.assertEqual(steps["submit"]["env"]["INPUT_RACK_COUNT"], "${{ inputs.rack_count }}")
+        self.assertEqual(self.action["outputs"]["task_racks"]["value"], "${{ steps.submit.outputs.task_racks }}")
 
     def test_master_preflight_validates_mode_and_port_without_cluster_side_effects(self):
         self.fake("kubectl")
