@@ -64,10 +64,12 @@ def run_publish(publisher, workspace, monkeypatch):
     monkeypatch.setenv("GITHUB_OUTPUT", str(workspace / "outputs"))
     monkeypatch.setenv("SOURCE_REPO", SOURCE_REPO)
     monkeypatch.setenv("SOURCE_COMMIT", SOURCE_COMMIT)
+    monkeypatch.setenv("SOURCE_BRANCH", "")
+    monkeypatch.setenv("SOURCE_TAG", "")
     monkeypatch.setenv("GITHUB_LOG_URL", LOG_URL)
     monkeypatch.setenv("GITHUB_RUN_ID", "123456")
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
-    for key in ("SOURCE_BRANCH", "SOURCE_TAG", "EXTRA_INFO", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY"):
+    for key in ("EXTRA_INFO", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY"):
         monkeypatch.delenv(key, raising=False)
     transport = Mock(side_effect=lambda args, **kwargs: subprocess.CompletedProcess(
         [], 0, "204" if args[args.index("--upload-file") + 1] == os.devnull else "\n201", "",
@@ -378,7 +380,7 @@ def test_properties_use_explicit_source_and_current_run(make_wheel, run_publish)
     assert args[-1] == (
         STORAGE_URL + WHEEL_NAME + "?properties="
         + f"repo={quote(SOURCE_REPO, safe='')};commit={SOURCE_COMMIT};"
-        + "branch=release%2F1.2;tag=v1.2.3;extra_info=;"
+        + "branch=release%2F1.2;tag=v1.2.3;"
         + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
     )
     assert "workflow=" not in args[-1]
@@ -390,22 +392,28 @@ def test_properties_use_explicit_source_and_current_run(make_wheel, run_publish)
     '[1,{"nested":[false,null,"\\u2603"]}]',
     '"a=b,c|d\\\\e"',
     "null", "42", "", "  { }  ",
+    "build_tool=vllm-sail/scripts/build_wheels.sh;vllm_commit=abcdef0;image=registry/image:tag",
 ])
-def test_extra_info_is_one_escaped_property_without_reformatting(extra_info, make_wheel, run_publish):
-    make_wheel()
+def test_extra_info_is_accepted_but_not_written(extra_info, make_wheel, run_publish, publisher, workspace):
+    for name in ("a.whl", "b.whl"):
+        make_wheel(filename=name)
     code, transport = run_publish(EXTRA_INFO=extra_info)
     assert code == 0
-    url = transport.call_args_list[1].args[0][-1]
-    query = url.split("?properties=", 1)[1].removesuffix("&recursive=0")
-    pairs = dict(pair.split("=", 1) for pair in query.split(";"))
-    assert set(pairs) == {"repo", "commit", "branch", "tag", "extra_info", "log_url", "run_id", "run_attempt"}
-    escaped = "".join("\\" + char if char in "\\,|=" else char for char in extra_info)
-    assert unquote(pairs["extra_info"]) == escaped
-    assert pairs["branch"] == pairs["tag"] == ""
-    assert "%0A" in pairs["extra_info"] if "\n" in extra_info else True
+    assert transport.call_count == 4
+    assert "extra_info" not in publisher.PROPERTY_ENV
+    for call, filename in zip(transport.call_args_list[1::2], ("a.whl", "b.whl")):
+        url = call.args[0][-1]
+        assert url == (
+            STORAGE_URL + filename + "?properties="
+            + f"repo={quote(SOURCE_REPO, safe='')};commit={SOURCE_COMMIT};"
+            + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
+        )
+        assert "extra_info" not in url
+    assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
 
 
 @pytest.mark.parametrize("key,value", [
+    ("SOURCE_COMMIT", " \n\t"),
     ("SOURCE_REPO", " \n\t"), ("SOURCE_REPO", "owner"),
     ("SOURCE_REPO", "https://github.com/owner/repo"), ("SOURCE_REPO", "owner/.."),
     ("SOURCE_REPO", "owner/repo/extra"),
@@ -423,25 +431,51 @@ def test_invalid_metadata_fails_before_any_request(key, value, make_wheel, run_p
     assert not (workspace / "outputs").exists()
 
 
-@pytest.mark.parametrize("key,property_name", [("SOURCE_REPO", "repo"), ("SOURCE_COMMIT", "commit")])
-def test_missing_source_does_not_fall_back_to_trigger_context(key, property_name, make_wheel, run_publish, monkeypatch):
+@pytest.mark.parametrize("key,property_name", [
+    ("SOURCE_REPO", "repo"), ("SOURCE_COMMIT", "commit"),
+    ("SOURCE_BRANCH", "branch"), ("SOURCE_TAG", "tag"),
+])
+def test_missing_source_fails_without_falling_back_to_trigger_context(
+    key, property_name, make_wheel, run_publish, monkeypatch, workspace, capsys,
+):
     make_wheel()
     monkeypatch.delenv(key)
-    code, transport = run_publish(GITHUB_REPOSITORY=SOURCE_REPO, GITHUB_SHA=SOURCE_COMMIT)
-    assert code == 0
-    query = transport.call_args_list[1].args[0][-1].split("?properties=", 1)[1]
-    assert f"{property_name}=;" in query
-
-
-def test_legacy_caller_without_new_inputs_still_uploads(make_wheel, run_publish, workspace):
-    make_wheel()
-    code, transport = run_publish(SOURCE_REPO="", SOURCE_COMMIT="", SOURCE_BRANCH="", SOURCE_TAG="", EXTRA_INFO="")
-    assert code == 0
-    assert transport.call_count == 2
-    assert transport.call_args_list[1].args[0][-1] == (
-        STORAGE_URL + WHEEL_NAME + "?properties=repo=;commit=;branch=;tag=;extra_info=;"
-        + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
+    code, transport = run_publish(
+        GITHUB_LOG_URL="", GITHUB_SERVER_URL="https://github.com",
+        GITHUB_REPOSITORY=SOURCE_REPO, GITHUB_SHA=SOURCE_COMMIT, GITHUB_REF_NAME="main",
     )
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+    assert f"{property_name} must be provided" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("repo", ["", SOURCE_REPO])
+@pytest.mark.parametrize("commit", ["", SOURCE_COMMIT])
+@pytest.mark.parametrize("branch", ["", "release/1.2"])
+@pytest.mark.parametrize("tag", ["", "v1.2.3"])
+def test_empty_source_properties_are_omitted(repo, commit, branch, tag, make_wheel, run_publish, workspace):
+    for filename in ("a.whl", "b.whl"):
+        make_wheel(filename=filename)
+    code, transport = run_publish(
+        SOURCE_REPO=repo, SOURCE_COMMIT=commit, SOURCE_BRANCH=branch, SOURCE_TAG=tag,
+        GITHUB_REPOSITORY="trigger-owner/trigger-repo", GITHUB_SHA="0" * 40, GITHUB_REF_NAME="main",
+    )
+    assert code == 0
+    assert transport.call_count == 4
+    expected_properties = {key: value for key, value in (
+        ("repo", repo), ("commit", commit), ("branch", branch), ("tag", tag),
+        ("log_url", LOG_URL), ("run_id", "123456"), ("run_attempt", "2"),
+    ) if value != ""}
+    expected_query = "properties=" + ";".join(
+        f"{key}={quote(value, safe='')}" for key, value in expected_properties.items()
+    )
+    for call, filename in zip(transport.call_args_list[1::2], ("a.whl", "b.whl")):
+        url = call.args[0][-1]
+        assert url == STORAGE_URL + filename + "?" + expected_query + "&recursive=0"
+        pairs = url.split("?properties=", 1)[1].removesuffix("&recursive=0").split(";")
+        assert all(pair.split("=", 1)[1] for pair in pairs)
+        assert {key: unquote(value) for key, value in (pair.split("=", 1) for pair in pairs)} == expected_properties
     assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
 
 
@@ -451,13 +485,12 @@ def test_legacy_caller_without_new_inputs_still_uploads(make_wheel, run_publish,
     ("https://github.com/", "https://github.com"),
     ("https://github.example.com/", "https://github.example.com"),
 ])
-def test_old_wrapper_uses_native_run_context_without_inventing_source(
+def test_native_run_context_fallback_preserves_required_source(
     log_url, server_url, expected_server, make_wheel, run_publish, monkeypatch, workspace,
 ):
     for filename in ("a.whl", "b.whl"):
         make_wheel(filename=filename)
-    # Old wrappers supply no source fields or log-link variable; run metadata is native to the runner.
-    for key in ("SOURCE_REPO", "SOURCE_COMMIT", "SOURCE_BRANCH", "SOURCE_TAG", "EXTRA_INFO", "GITHUB_LOG_URL"):
+    for key in ("EXTRA_INFO", "GITHUB_LOG_URL"):
         monkeypatch.delenv(key, raising=False)
     if log_url is not None:
         monkeypatch.setenv("GITHUB_LOG_URL", log_url)
@@ -471,7 +504,8 @@ def test_old_wrapper_uses_native_run_context_without_inventing_source(
     expected_log = f"{expected_server}/ci-owner/ci-repo/actions/runs/44707911317"
     for call, filename in zip(transport.call_args_list[1::2], ("a.whl", "b.whl")):
         assert call.args[0][-1] == (
-            STORAGE_URL + filename + "?properties=repo=;commit=;branch=;tag=;extra_info=;"
+            STORAGE_URL + filename + "?properties="
+            + f"repo={quote(SOURCE_REPO, safe='')};commit={SOURCE_COMMIT};"
             + f"log_url={quote(expected_log, safe='')};run_id=44707911317;run_attempt=3&recursive=0"
         )
     assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
@@ -560,14 +594,14 @@ def test_workflow_wiring_and_secret_scope():
     assert set(call["inputs"]) == {
         "artifact_name", "template_repository", "template_ref", "repo", "commit", "branch", "tag", "extra_info",
     }
-    for name in ("artifact_name", "template_ref"):
+    for name in ("artifact_name", "template_ref", "repo", "commit", "branch", "tag"):
         assert call["inputs"][name]["required"] == "true"
         assert call["inputs"][name]["type"] == "string"
-    for name in ("repo", "commit", "branch", "tag", "extra_info"):
-        assert call["inputs"][name] == {
-            "description": call["inputs"][name]["description"],
-            "required": "false", "type": "string", "default": "",
-        }
+        assert "default" not in call["inputs"][name]
+    assert call["inputs"]["extra_info"] == {
+        "description": call["inputs"]["extra_info"]["description"],
+        "required": "false", "type": "string", "default": "",
+    }
     assert not {"log_url", "run_id", "run_attempt", "workflow"} & set(call["inputs"])
     job = workflow["jobs"]["push-wheel"]
     guard, checkout, setup, download, upload = job["steps"]
